@@ -1,16 +1,26 @@
 package io.pipecrafts.prototype.integration.demo.verification;
 
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.service.annotation.HttpExchange;
-import org.springframework.web.service.annotation.PostExchange;
+import org.springframework.stereotype.Component;
+import org.springframework.web.client.RestClient;
 
-@HttpExchange("/challenges")
-public interface VerificationClient {
+import io.pipecrafts.prototype.integration.client.ResilientRestClients;
+import io.pipecrafts.prototype.integration.demo.DemoClients;
 
-    @PostExchange
-    Challenge startChallenge(@RequestBody StartChallengeRequest request);
+@Component
+public class VerificationClient {
 
-    @PostExchange("/{challengeId}/verify")
-    VerificationResult verify(@PathVariable String challengeId, @RequestBody VerifyRequest request);
+    private final RestClient restClient;
+
+    public VerificationClient(ResilientRestClients clients) {
+        this.restClient = clients.create(DemoClients.VERIFICATION);
+    }
+
+    public Challenge startChallenge(StartChallengeRequest request) {
+        return restClient.post().uri("/challenges").body(request).retrieve().body(Challenge.class);
+    }
+
+    public VerificationResult verify(String challengeId, VerifyRequest request) {
+        return restClient.post().uri("/challenges/{challengeId}/verify", challengeId).body(request).retrieve()
+                .body(VerificationResult.class);
+    }
 }

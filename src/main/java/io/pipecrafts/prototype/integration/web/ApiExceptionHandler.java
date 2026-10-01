@@ -10,6 +10,7 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.client.RestClientException;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
@@ -30,6 +31,18 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     @ExceptionHandler(DependencyFailedException.class)
     ProblemDetail handleDependencyFailed() {
+        return ApiProblems.of(ApiErrorCode.DEPENDENCY_FAILED);
+    }
+
+    /**
+     * Statuses and transport errors are translated inside the client, so the only {@code RestClientException}
+     * left is a response body that could not be decoded. It is logged here because decoding happens after the
+     * client's interceptors and status handler have run.
+     */
+    @ExceptionHandler(RestClientException.class)
+    ProblemDetail handleUnreadableResponse(RestClientException ex) {
+        log.warn("Downstream call failed: outcome=DEPENDENCY_FAILURE reason=MALFORMED_RESPONSE cause={}",
+                ex.getClass().getSimpleName());
         return ApiProblems.of(ApiErrorCode.DEPENDENCY_FAILED);
     }
 

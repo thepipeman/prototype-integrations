@@ -14,7 +14,7 @@ import org.springframework.http.client.ClientHttpResponse;
 import org.springframework.web.client.RestClient;
 
 /**
- * Turns every non-success classification into a typed {@link DownstreamException}.
+ * Turns every non-success classification into a typed {@link DownstreamException}, logging it once.
  *
  * <p>Registered for every status, so it pre-empts Spring's default 4xx/5xx handler: a classifier that maps a 4xx
  * to success really does get a normal decode.
@@ -24,28 +24,35 @@ public final class DownstreamStatusHandler implements RestClient.ResponseSpec.Er
     private final String dependency;
     private final FailureClassifier classifier;
     private final ErrorBodyParser parser;
+    private final DownstreamFailureLog failureLog;
 
-    public DownstreamStatusHandler(String dependency, FailureClassifier classifier, ErrorBodyParser parser) {
+    public DownstreamStatusHandler(String dependency, FailureClassifier classifier, ErrorBodyParser parser,
+            DownstreamFailureLog failureLog) {
         this.dependency = dependency;
         this.classifier = classifier;
         this.parser = parser;
+        this.failureLog = failureLog;
     }
 
     @Override
     public void handle(HttpRequest request, ClientHttpResponse response) throws IOException {
         HttpStatusCode status = response.getStatusCode();
         Classification classification = classifier.classify(status);
-        switch (classification.category()) {
-            case SUCCESS -> {
-            }
+        String operation = DownstreamOperation.of(request);
+        @Nullable DownstreamException failure = switch (classification.category()) {
+            case SUCCESS -> null;
             case BUSINESS -> {
                 byte[] body = readBody(response);
-                throw new DownstreamBusinessException(dependency, DownstreamOperation.from(request.getAttributes()),
-                        status, parser.parse(body, contentType(response)), new String(body, UTF_8));
+                yield new DownstreamBusinessException(dependency, operation, status,
+                        parser.parse(body, contentType(response)), new String(body, UTF_8));
             }
-            case DEPENDENCY_FAILURE, DEPENDENCY_REJECTED -> throw new DependencyFailedException(dependency,
-                    DownstreamOperation.from(request.getAttributes()), status, classification.category(),
-                    requireNonNull(classification.reason()), new String(readBody(response), UTF_8), null);
+            case DEPENDENCY_FAILURE, DEPENDENCY_REJECTED -> new DependencyFailedException(dependency, operation,
+                    status, classification.category(), requireNonNull(classification.reason()),
+                    new String(readBody(response), UTF_8), null);
+        };
+        if (failure != null) {
+            failureLog.record(failure);
+            throw failure;
         }
     }
 

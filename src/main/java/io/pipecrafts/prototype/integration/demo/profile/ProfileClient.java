@@ -1,16 +1,25 @@
 package io.pipecrafts.prototype.integration.demo.profile;
 
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.service.annotation.GetExchange;
-import org.springframework.web.service.annotation.HttpExchange;
+import org.springframework.stereotype.Component;
+import org.springframework.web.client.RestClient;
 
-@HttpExchange("/profiles")
-public interface ProfileClient {
+import io.pipecrafts.prototype.integration.client.ResilientRestClients;
+import io.pipecrafts.prototype.integration.demo.DemoClients;
 
-    @GetExchange("/{id}")
-    Profile getProfile(@PathVariable String id);
+@Component
+public class ProfileClient {
 
-    @GetExchange
-    Profile findByMobile(@RequestParam String mobile);
+    private final RestClient restClient;
+
+    public ProfileClient(ResilientRestClients clients) {
+        this.restClient = clients.create(DemoClients.PROFILE);
+    }
+
+    public Profile getProfile(String id) {
+        return restClient.get().uri("/profiles/{id}", id).retrieve().body(Profile.class);
+    }
+
+    public Profile findByMobile(String mobile) {
+        return restClient.get().uri("/profiles?mobile={mobile}", mobile).retrieve().body(Profile.class);
+    }
 }

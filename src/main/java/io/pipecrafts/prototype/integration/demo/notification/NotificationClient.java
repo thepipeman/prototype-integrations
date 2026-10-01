@@ -1,17 +1,37 @@
 package io.pipecrafts.prototype.integration.demo.notification;
 
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.service.annotation.GetExchange;
-import org.springframework.web.service.annotation.HttpExchange;
-import org.springframework.web.service.annotation.PostExchange;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+import org.springframework.web.client.RestClient;
 
-@HttpExchange("/notifications")
-public interface NotificationClient {
+import io.pipecrafts.prototype.integration.client.ResilientRestClients;
+import io.pipecrafts.prototype.integration.demo.DemoClients;
+import io.pipecrafts.prototype.integration.failure.Classification;
+import io.pipecrafts.prototype.integration.failure.DefaultFailureClassifier;
 
-    @PostExchange
-    NotificationReceipt send(@RequestBody NotificationRequest request);
+/** Escape-hatch showcase: its own failure policy and an extra header, without touching any other client. */
+@Component
+public class NotificationClient {
 
-    @GetExchange("/{id}/status")
-    NotificationStatus getStatus(@PathVariable String id);
+    private final RestClient restClient;
+
+    public NotificationClient(ResilientRestClients clients, @Value("${demo.notification.api-key}") String apiKey) {
+        this.restClient = clients.create(DemoClients.NOTIFICATION,
+                // A 409 means "duplicate submission, already accepted" and carries a normal receipt. Rejected
+                // credentials count as breaker failures: a non-critical dependency with broken auth should stop
+                // being called.
+                DefaultFailureClassifier.builder()
+                        .countRejectedAsFailure(true)
+                        .override(409, Classification.success())
+                        .build(),
+                builder -> builder.defaultHeader("X-Api-Key", apiKey));
+    }
+
+    public NotificationReceipt send(NotificationRequest request) {
+        return restClient.post().uri("/notifications").body(request).retrieve().body(NotificationReceipt.class);
+    }
+
+    public NotificationStatus getStatus(String id) {
+        return restClient.get().uri("/notifications/{id}/status", id).retrieve().body(NotificationStatus.class);
+    }
 }

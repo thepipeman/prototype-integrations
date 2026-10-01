@@ -5,7 +5,7 @@ spring:
     virtual:
       enabled: true
   http:
-    # One block per downstream; the key is the @ImportHttpServices group name.
+    # One block per downstream; the key is the name passed to ResilientRestClients.create(...).
     # Placeholder localhost URLs: the app starts without the downstreams running.
     serviceclient:
       profile-service:

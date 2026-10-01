@@ -2,10 +2,10 @@
 
 A standalone prototype of two things meant for the cc-auth rewrite:
 
-1. A reusable, low-ceremony **circuit breaker** for every outbound `@HttpExchange` client.
+1. A reusable, low-ceremony **circuit breaker** for every outbound `RestClient`.
 2. One **error-handling pattern** that replaces per-call `try/catch` ladders.
 
-Every client registered with Spring's HTTP Service Registry gets the following, with no per-client code:
+Clients are ordinary `RestClient` classes. Every client created through `ResilientRestClients.create(name)` gets the following, with no per-client code:
 
 - one `FailureClassifier` that decides both the breaker outcome and the exception type,
 - a Resilience4j breaker applied by a `ClientHttpRequestInterceptor`,
@@ -24,11 +24,11 @@ The integration tests are the demo. With `bootRun` and nothing listening on the 
 
 | Package (`io.pipecrafts.prototype.integration.*`) | Role |
 |---|---|
-| `client` | Registration wiring and transport: `ResilientHttpServiceGroupConfigurer`, `CircuitBreakerInterceptor`, `ResilientClientCustomizer`, `ResilientClientsProperties`, exchange-adapter decorator |
+| `client` | `ResilientRestClients` (the one entry point), `CircuitBreakerInterceptor`, `DownstreamFailureInterceptor`, `ResilientClientsProperties` |
 | `failure` | Single source of truth for classification: `FailureClassifier` (+ `DefaultFailureClassifier`), categories and reasons, `ErrorBodyParser`, the sealed exceptions, `CircuitOpenIOException`, status handler, translator, `DownstreamFailureLog` |
 | `call` | `Downstream.call(...)`, the facade helper |
 | `web` | `ApiExceptionHandler`, `ApiProblems` (ProblemDetail factory), `ApiErrorCode` |
-| `demo.*` | Four demo downstreams, each with an `@HttpExchange` interface, a facade, a controller and records |
+| `demo.*` | Four demo downstreams, each with a `RestClient` client class, a facade, a controller and records |
 
 Dependencies point one way: `demo` → `call`/`failure`/`web`, and `client` → `failure`. The reusable packages never import `demo`.
 
@@ -51,48 +51,70 @@ Internal reasons, which only ever appear in logs and metrics: `SERVER_ERROR`, `T
 
 Exceptions form a sealed hierarchy: `DownstreamException` permits `DependencyFailedException` and `DownstreamBusinessException`. Both carry `dependency`, `operation` and `httpStatus()` (empty for I/O failures). `reason` lives on `DependencyFailedException` only. Exception messages are built from those fields alone and never include bodies, headers or URLs.
 
+## Circuit breaker at a glance
+
+> Full walkthrough with more diagrams, a per-client customization table and a "where to look in the code" map: **[docs/circuit-breaker.md](docs/circuit-breaker.md)**.
+
+Each client gets its own breaker, named after the client. The breaker only counts **dependency failures**; business 4xx count as success and 401/403 aren't counted at all.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> CLOSED
+    CLOSED --> OPEN: ≥ 50% of the last 20 calls failed<br/>(after at least 10 calls)
+    OPEN --> HALF_OPEN: 30s passed and a new call arrives
+    HALF_OPEN --> CLOSED: 3 probe calls mostly succeed
+    HALF_OPEN --> OPEN: 3 probe calls mostly fail
+```
+
+While **OPEN**, every call fails fast with 502 `DEPENDENCY_FAILED` (`reason=CIRCUIT_OPEN`) and nothing reaches the network. Thresholds come from `resilience4j.circuitbreaker.configs.default` and can be tuned per client.
+
+**Reusing it is one line.** Any client class that builds its `RestClient` with `clients.create("<name>")` is protected; there is no breaker code in clients or facades:
+
+```mermaid
+flowchart LR
+    N(["&quot;loyalty-service&quot;"]) --> T["spring.http.serviceclient.loyalty-service<br/>base URL, timeouts (required)"]
+    N --> R["resilience4j.circuitbreaker.instances.loyalty-service<br/>tuning (optional)"]
+    N --> P["prototype.clients.loyalty-service.breaker.enabled<br/>on/off (optional)"]
+    N --> C["clients.create(&quot;loyalty-service&quot;)"]
+    C --> B["RestClient with its own breaker"]
+```
+
+See [Adding a fifth downstream](#adding-a-fifth-downstream) for the code and the [Escape-hatch cookbook](#escape-hatch-cookbook) for per-client tweaks.
+
 ## Call pipeline and ordering
 
 ```
-Facade ── client.getProfile(id) ─────────────────────────────────────────────────────────────┐
-                                                                                             │
- DownstreamExchangeAdapter   (outermost; proxy level)                                        │
-   translate RestClient failures -> DependencyFailedException, log + count ONCE              │
- └─ RestClient                                                                               │
-     ├─ interceptors added by RestClientCustomizer / ResilientClientCustomizer (outer)      │
-     │   └─ CircuitBreakerInterceptor   (innermost, always last)                             │
-     │        OPEN?  -> throw CircuitOpenIOException (never touches the wire)                │
-     │        else   -> execute, buffer the whole body, classify the raw status,             │
-     │                  record success / failure / ignored with duration                     │
-     │                  (IOException: recorded as failure, rethrown unchanged)               │
-     │            └─ HttpClient5 (automatic retries disabled) ── wire ── downstream          │
-     │   IOException from the chain -> ResourceAccessException                               │
-     └─ DownstreamStatusHandler   (runs AFTER the chain returns; matches every status)       │
-          same classifier -> no-op | DownstreamBusinessException | DependencyFailedException │
-◄────────────────────────────────────────────────── body | DownstreamException ─────────────┘
+Facade ── client.getProfile(id) ── restClient.get().uri("/profiles/{id}", id).retrieve().body(...)
+  RestClient
+   ├─ interceptors from Boot's RestClientCustomizers (outermost)
+   │   └─ DownstreamFailureInterceptor
+   │        IOException -> DependencyFailedException (TIMEOUT / CONNECTION_FAILED / CIRCUIT_OPEN), logged once
+   │       └─ interceptors added by the per-client customizer
+   │           └─ CircuitBreakerInterceptor   (innermost, always added last)
+   │                OPEN?  -> throw CircuitOpenIOException (never touches the wire)
+   │                else   -> execute, buffer the whole body, classify the raw status,
+   │                          record success / failure / ignored with duration
+   │                    └─ HttpClient5 (automatic retries disabled) ── wire ── downstream
+   └─ DownstreamStatusHandler   (runs AFTER the chain returns; matches every status)
+        same classifier -> no-op | DownstreamBusinessException | DependencyFailedException, logged once
 ```
 
 Rules:
 
-- **The breaker is innermost.** `ResilientHttpServiceGroupConfigurer` runs last (`LOWEST_PRECEDENCE`, after Boot's properties and `RestClientCustomizer` configurers). It applies per-client customizers, then moves the breaker to the end of the interceptor list.
+- **The breaker is innermost.** `ResilientRestClients` adds it after the per-client customizer has run.
 - **The breaker never relies on handler exceptions.** It sees raw statuses and raw `IOException`s. The status handler runs later, inside `RestClient`, on the buffered response.
-- **Translation and logging happen exactly once**, in the outermost layer. Facades never log downstream failures.
+- **Translation and logging happen exactly once**, in the failure interceptor (I/O) or the status handler (statuses). Facades never log downstream failures. RestClient rethrows runtime exceptions from interceptors unchanged, so callers never see a `ResourceAccessException`.
 - **The body is fully buffered inside the breaker.** Measured duration therefore includes body transfer, so slow-call thresholds mean something, and a mid-body timeout is counted by the breaker. Streaming or large-payload clients should set `breaker.enabled: false`.
 - **HttpClient5's automatic retry is disabled.** Otherwise it silently resends 429/503 after one second regardless of HTTP method, POSTs included. That would hide two attempts inside one breaker measurement.
 - **The classifier is the only authority.** Never set `recordExceptions`, `ignoreExceptions` or `recordResult` in `resilience4j.circuitbreaker.*`.
 - **Status handler pre-emption.** The handler is registered for every status, so Spring's default 4xx/5xx handler is never reached. A classifier that maps a 4xx to success really does yield a normal decode.
 
-## Registration: adding a fifth downstream
+## Adding a fifth downstream
 
-The group name is used everywhere: the `@ImportHttpServices` group, the `spring.http.serviceclient.<name>` key, the `prototype.clients.<name>` key, the Resilience4j instance name, and the `@Qualifier` for per-client beans.
+The client name is used everywhere: the `spring.http.serviceclient.<name>` key, the `prototype.clients.<name>` key and the Resilience4j instance name.
 
-```diff
- // demo/DemoClients.java
- @ImportHttpServices(group = DemoClients.NOTIFICATION, types = NotificationClient.class)
-+@ImportHttpServices(group = DemoClients.LOYALTY, types = LoyaltyClient.class)
- public class DemoClients {
-+    public static final String LOYALTY = "loyalty-service";
-```
+Transport config is Boot's own `spring.http.serviceclient.<name>` block (base URL, timeouts, default headers, SSL bundle). `ResilientRestClients` reads it directly, so the same YAML would also serve an `@HttpExchange` client if one is ever needed.
 
 ```diff
  # application.yaml
@@ -103,24 +125,27 @@ The group name is used everywhere: the `@ImportHttpServices` group, the `spring.
 +    read-timeout: 2s
 ```
 
-```diff
-+@HttpExchange("/points")
-+public interface LoyaltyClient {
-+    @GetExchange("/{customerId}")
-+    Points getPoints(@PathVariable String customerId);
-+}
+```java
+@Component
+public class LoyaltyClient {
+
+    private final RestClient restClient;
+
+    public LoyaltyClient(ResilientRestClients clients) {
+        this.restClient = clients.create("loyalty-service");
+    }
+
+    public Points getPoints(String customerId) {
+        return restClient.get().uri("/points/{customerId}", customerId).retrieve().body(Points.class);
+    }
+}
 ```
 
 That's all. The client gets the breaker (from `configs.default`), the default classifier, typed exceptions, structured logging and the metric. Inject `LoyaltyClient` into a facade.
 
-Misconfiguration fails at startup:
+Use `uri(String template, vars...)` as above: the template becomes the `operation` name in logs and metrics. A call built only from a `URI` or a `UriBuilder` function is logged as `operation=GET unknown`.
 
-- a group without `base-url`,
-- a `prototype.clients.<name>` key that names no group (catches typos in `enabled: false`),
-- a `FailureClassifier` or `ResilientClientCustomizer` bean qualified for no group,
-- two classifiers for one group.
-
-A `resilience4j.circuitbreaker.instances.<name>` with no matching group only logs a WARN.
+A client without `base-url` fails at startup, because its constructor calls `create(...)`.
 
 ## Escape-hatch cookbook
 
@@ -140,34 +165,24 @@ prototype.clients:
       enabled: false   # no interceptor at all; classification, translation and logging unchanged
 ```
 
-**2. Per-client policy: a `FailureClassifier` bean qualified with the group name.** Tests: scenarios 19 and 22.
+**2. Per-client policy and builder tweaks: pass them to `create`.** Tests: scenarios 19, 20 and 22.
 
 ```java
-@Bean
-@Qualifier(DemoClients.NOTIFICATION)
-FailureClassifier notificationFailureClassifier() {
-    return DefaultFailureClassifier.builder()
-            .countRejectedAsFailure(true)                 // 401/403 open this client's breaker
-            .override(409, Classification.success())      // duplicate submission = already accepted
-            .build();
+public NotificationClient(ResilientRestClients clients, @Value("${demo.notification.api-key}") String apiKey) {
+    this.restClient = clients.create(DemoClients.NOTIFICATION,
+            DefaultFailureClassifier.builder()
+                    .countRejectedAsFailure(true)                 // 401/403 open this client's breaker
+                    .override(409, Classification.success())      // duplicate submission = already accepted
+                    .build(),
+            builder -> builder.defaultHeader("X-Api-Key", apiKey));
 }
 ```
 
-The override drives the breaker **and** the status handler. Here, a 409 is decoded into a normal `NotificationReceipt` and recorded as a breaker success. To treat a status as an outage instead, use `.override(409, Classification.dependencyFailure(FailureReason.SERVER_ERROR))`.
+The classifier drives the breaker **and** the status handler. Here, a 409 is decoded into a normal `NotificationReceipt` and recorded as a breaker success. To treat a status as an outage instead, use `.override(409, Classification.dependencyFailure(FailureReason.SERVER_ERROR))`.
 
-**3. Per-client builder customization: a `ResilientClientCustomizer` bean qualified with the group name.** Test: scenario 20.
+The customizer runs after the defaults. Interceptors it adds sit outside the breaker. It can't change classification: a `defaultStatusHandler` it adds is never reached, so use a classifier instead. `create(name, customizer)` skips the classifier. For something that applies to every client, use Boot's `RestClientCustomizer`. For static headers, `spring.http.serviceclient.<name>.default-header.*` is enough; notification's `Efs-Product-Id` uses it.
 
-```java
-@Bean
-@Qualifier(DemoClients.NOTIFICATION)
-ResilientClientCustomizer notificationApiKey(@Value("${demo.notification.api-key}") String apiKey) {
-    return builder -> builder.defaultHeader("X-Api-Key", apiKey);
-}
-```
-
-Customizers run after all defaults, in `@Order` order. Interceptors they add always sit outside the breaker. They can't change classification: a `defaultStatusHandler` they add is never reached, so use a classifier instead. They must not depend on HTTP service proxies. For something that applies to every client, use Boot's `RestClientCustomizer`. For static headers, `spring.http.serviceclient.<name>.default-header.*` is enough; notification's `Efs-Product-Id` uses it.
-
-**4. Per-call business mapping with `Downstream.call(...)`.** Tests: scenarios 2–4 and 21. See the next section.
+**3. Per-call business mapping with `Downstream.call(...)`.** Tests: scenarios 2–4 and 21. See the next section.
 
 To replace the error-body parser for every client, define an `ErrorBodyParser` bean.
 
@@ -240,8 +255,8 @@ It's byte-identical across reasons for a given endpoint (scenario 12). Spring fi
 
 ## Observability
 
-- **Logs.** One line per failure from `DownstreamFailureLog`: WARN for dependency failures, INFO for business failures. It uses SLF4J key-values, also rendered in the message, for example `dependency=account-service operation=AccountClient#getBalance outcome=DEPENDENCY_FAILURE reason=TIMEOUT httpStatus=none downstreamCode=none cause=SocketTimeoutException`.
-  - `operation` is `Interface#method`, never a URI, because query strings carry PII such as mobile numbers.
+- **Logs.** One line per failure from `DownstreamFailureLog`: WARN for dependency failures, INFO for business failures. It uses SLF4J key-values, also rendered in the message, for example `dependency=account-service operation=GET /accounts/{id}/balance outcome=DEPENDENCY_FAILURE reason=TIMEOUT httpStatus=none downstreamCode=none cause=SocketTimeoutException`.
+  - `operation` is the HTTP method plus the URI *template* (`GET /profiles/{id}`), never the expanded URI or query string, because those carry PII such as mobile numbers.
   - Only the root-cause *type* is logged, because transport messages contain URLs.
   - The downstream `message` and a ≤512-character body snippet are logged at DEBUG only. Headers are never logged.
 - **Metric.** `downstream.failures{dependency, operation, category, reason}`. All tags are bounded. Breaker metrics come from `resilience4j-micrometer`, and per-call latency comes from Boot's `http.client.requests`.
@@ -253,7 +268,7 @@ It's byte-identical across reasons for a given endpoint (scenario 12). Spring fi
 |---|---|
 | `MfaServiceClient`'s catch ladder: catch `HttpCallException`, inspect the status, log, then translate per operation | `VerificationFacade.verify`: one `Downstream.call(...)` declaring the two expected codes. Classification, logging and translation of everything else happen once in the shared layer. 401/403 become a 502 with `reason=UNAUTHORIZED` instead of being mistaken for a business answer. |
 | `CustomerLookupService`'s 404 handling (catch, check for 404, return empty) | `ProfileFacade.find`: `.onBusiness(404, Optional::empty)`. The same 404 on an endpoint that doesn't expect it propagates as `DOWNSTREAM_REJECTED`; it isn't silently swallowed. |
-| `HttpExchangesConfiguration` (hand-built clients, per-client timeouts, interceptors and error handlers) | One `@ImportHttpServices` line per client, `spring.http.serviceclient.<name>.*` for base URL, timeouts and default headers, `resilience4j.circuitbreaker.instances.<name>` for breaker tuning, and `ResilientHttpServiceGroupConfigurer` (unchanged) for everything else. Per-client deviation goes through the qualified-bean escape hatches. |
+| `HttpExchangesConfiguration` (hand-built clients, per-client timeouts, interceptors and error handlers) | One `clients.create(name)` call per client class, `spring.http.serviceclient.<name>.*` for base URL, timeouts and default headers, and `resilience4j.circuitbreaker.instances.<name>` for breaker tuning. Per-client deviation is passed to `create(...)` right in the client's constructor. |
 
 Points to raise during the rewrite:
 
@@ -263,11 +278,10 @@ Points to raise during the rewrite:
 
 ## Decisions
 
-1. **Registration mechanism.** Stock `@ImportHttpServices` (one line per downstream) plus one global `RestClientHttpServiceGroupConfigurer` that applies resilience to every group.
-   - There's no custom annotation and no property-scanning registrar.
-   - A custom annotation would need its own registrar on top of Spring's and adds nothing over the one-liner.
-   - A property-scanning registrar would name interfaces as strings, losing the compile-time reference.
-   - Transport properties reuse Boot's `spring.http.serviceclient.<group>.*`, so nothing is duplicated.
+1. **Client style.** Plain `RestClient` client classes built by one `ResilientRestClients.create(name, ...)` factory, not `@HttpExchange` interfaces.
+   - It's the `RestClient` usage the team already knows; there's no proxy layer, no service-group configurer and no qualifier matching.
+   - Per-client policy lives in the client's constructor, next to the calls it affects.
+   - Transport properties reuse Boot's `spring.http.serviceclient.<name>.*`, so nothing is duplicated and the YAML doesn't change if a client ever moves to `@HttpExchange`.
 2. **`Downstream.call` shape.** A small immutable fluent object (`onBusiness`, `onBusinessCode`, general predicate form, then `get()`), not static functions. It reads as a declaration of expected outcomes, there's one terminal call, and there's no overload explosion. Map success inside the supplier.
 3. **401/403 and the breaker.** Ignored (permission released, nothing recorded) by default. A client opts into counting them as failures with `DefaultFailureClassifier.builder().countRejectedAsFailure(true)`. There's deliberately no global property, so per-client policy has exactly one mechanism.
 4. **`reason` as a metric.** Yes: `downstream.failures` carries `reason` (`none` for business failures).
@@ -276,7 +290,7 @@ Also decided:
 
 - Unmapped business errors are a constant 422 `DOWNSTREAM_REJECTED`. A downstream 404/400 never masquerades as ours.
 - The 502 is identical per endpoint (`instance` differs across endpoints).
-- A 2xx with an undecodable body returns 502 `MALFORMED_RESPONSE` but is recorded as a breaker **success**. Decoding happens after the interceptor, and a contract bug isn't an availability problem.
+- A 2xx with an undecodable body returns 502 `MALFORMED_RESPONSE` but is recorded as a breaker **success**. Decoding happens after the interceptors and status handler, so `ApiExceptionHandler` maps the leftover `RestClientException` and logs it; that log line has no `dependency`. A contract bug isn't an availability problem.
 - No automatic retry anywhere.
 
 ## Known limitations
@@ -325,7 +339,7 @@ Unit tests:
 - `DownstreamFailureTranslatorTest`: I/O cause → reason.
 - `DownstreamCallTest`: helper semantics.
 - `ApiExceptionHandlerTest`: identical 502 for every reason, `INVALID_REQUEST`.
-- `ResilientClientStartupValidationTest`: fail-fast rules.
+- `ResilientClientStartupValidationTest`: a client without `base-url` fails startup.
 
 ## Future
 

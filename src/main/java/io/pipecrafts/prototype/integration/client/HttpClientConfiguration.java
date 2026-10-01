@@ -1,14 +1,18 @@
 package io.pipecrafts.prototype.integration.client;
 
 import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
-import org.springframework.beans.factory.ListableBeanFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder;
+import org.springframework.boot.http.client.HttpClientSettings;
 import org.springframework.boot.http.client.HttpComponentsClientHttpRequestFactoryBuilder;
 import org.springframework.boot.http.client.autoconfigure.ClientHttpRequestFactoryBuilderCustomizer;
+import org.springframework.boot.http.client.autoconfigure.HttpClientSettingsPropertyMapper;
 import org.springframework.boot.http.client.autoconfigure.service.HttpServiceClientProperties;
+import org.springframework.boot.ssl.SslBundles;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.web.client.RestClient;
 
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -35,14 +39,20 @@ public class HttpClientConfiguration {
         return new DownstreamFailureLog(meterRegistry);
     }
 
-    /** Defining an {@link ErrorBodyParser} bean replaces the tolerant default for every client. */
+    /**
+     * Starts from Boot's {@code RestClient.Builder}, so global {@code RestClientCustomizer}s, message converters
+     * and observations apply to every client. Defining an {@link ErrorBodyParser} bean replaces the tolerant
+     * default for every client.
+     */
     @Bean
-    ResilientHttpServiceGroupConfigurer resilientHttpServiceGroupConfigurer(ListableBeanFactory beanFactory,
-            CircuitBreakerRegistry breakerRegistry, ResilientClientsProperties resilientProperties,
-            HttpServiceClientProperties serviceClientProperties, ObjectProvider<ErrorBodyParser> errorBodyParser,
-            JsonMapper jsonMapper, DownstreamFailureLog failureLog) {
-        return new ResilientHttpServiceGroupConfigurer(beanFactory, breakerRegistry, resilientProperties,
-                serviceClientProperties, errorBodyParser.getIfAvailable(() -> new TolerantErrorBodyParser(jsonMapper)),
-                failureLog);
+    ResilientRestClients resilientRestClients(RestClient.Builder restClientBuilder,
+            ClientHttpRequestFactoryBuilder<?> requestFactoryBuilder, ObjectProvider<SslBundles> sslBundles,
+            ObjectProvider<HttpClientSettings> globalSettings, HttpServiceClientProperties transportProperties,
+            ResilientClientsProperties resilientProperties, CircuitBreakerRegistry breakerRegistry,
+            ObjectProvider<ErrorBodyParser> errorBodyParser, JsonMapper jsonMapper, DownstreamFailureLog failureLog) {
+        return new ResilientRestClients(restClientBuilder, requestFactoryBuilder,
+                new HttpClientSettingsPropertyMapper(sslBundles.getIfAvailable(), globalSettings.getIfAvailable()),
+                transportProperties, resilientProperties, breakerRegistry,
+                errorBodyParser.getIfAvailable(() -> new TolerantErrorBodyParser(jsonMapper)), failureLog);
     }
 }

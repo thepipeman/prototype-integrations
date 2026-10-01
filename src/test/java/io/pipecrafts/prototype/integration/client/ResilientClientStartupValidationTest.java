@@ -19,14 +19,6 @@ class ResilientClientStartupValidationTest {
     }
 
     @Test
-    void misspelledResilienceKeyFailsStartup() {
-        assertThatThrownBy(() -> start("--prototype.clients.acount-service.breaker.enabled=false"))
-                .rootCause()
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("prototype.clients.acount-service does not match any registered");
-    }
-
-    @Test
     void missingBaseUrlFailsStartup() {
         assertThatThrownBy(() -> start("--spring.http.serviceclient.profile-service.base-url="))
                 .rootCause()

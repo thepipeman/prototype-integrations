@@ -6,8 +6,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
 /**
- * Resilience settings per HTTP service group, keyed by group name. Transport settings (base URL, timeouts, default
- * headers) live under Boot's {@code spring.http.serviceclient.<group>} instead.
+ * Resilience settings per downstream, keyed by client name. Transport settings (base URL, timeouts, default headers)
+ * live under Boot's {@code spring.http.serviceclient.<name>} instead.
  */
 @ConfigurationProperties("prototype")
 public record ResilientClientsProperties(@DefaultValue Map<String, Client> clients) {
@@ -16,8 +16,8 @@ public record ResilientClientsProperties(@DefaultValue Map<String, Client> clien
         clients = Map.copyOf(clients);
     }
 
-    public boolean breakerEnabled(String group) {
-        Client client = clients.get(group);
+    public boolean breakerEnabled(String name) {
+        Client client = clients.get(name);
         return client == null || client.breaker().enabled();
     }
 

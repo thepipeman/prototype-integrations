@@ -1,15 +1,25 @@
 package io.pipecrafts.prototype.integration.demo.account;
 
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.service.annotation.GetExchange;
-import org.springframework.web.service.annotation.HttpExchange;
+import org.springframework.stereotype.Component;
+import org.springframework.web.client.RestClient;
 
-@HttpExchange("/accounts/{id}")
-public interface AccountClient {
+import io.pipecrafts.prototype.integration.client.ResilientRestClients;
+import io.pipecrafts.prototype.integration.demo.DemoClients;
 
-    @GetExchange("/balance")
-    Balance getBalance(@PathVariable String id);
+@Component
+public class AccountClient {
 
-    @GetExchange("/transactions")
-    Transactions getTransactions(@PathVariable String id);
+    private final RestClient restClient;
+
+    public AccountClient(ResilientRestClients clients) {
+        this.restClient = clients.create(DemoClients.ACCOUNT);
+    }
+
+    public Balance getBalance(String id) {
+        return restClient.get().uri("/accounts/{id}/balance", id).retrieve().body(Balance.class);
+    }
+
+    public Transactions getTransactions(String id) {
+        return restClient.get().uri("/accounts/{id}/transactions", id).retrieve().body(Transactions.class);
+    }
 }

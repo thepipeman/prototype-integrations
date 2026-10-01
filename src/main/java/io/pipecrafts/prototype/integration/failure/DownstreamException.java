@@ -33,7 +33,7 @@ public abstract sealed class DownstreamException extends RuntimeException
         return dependency;
     }
 
-    /** The {@code Interface#method} that made the call. */
+    /** The call as {@code METHOD /uri/{template}}; see {@link DownstreamOperation}. */
     public String operation() {
         return operation;
     }
