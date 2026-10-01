@@ -1,3 +1,76 @@
 spring:
   application:
     name: prototype-integrations
+  threads:
+    virtual:
+      enabled: true
+  http:
+    # One block per downstream; the key is the @ImportHttpServices group name.
+    # Placeholder localhost URLs: the app starts without the downstreams running.
+    serviceclient:
+      profile-service:
+        base-url: http://localhost:9101
+        connect-timeout: 500ms
+        read-timeout: 2s
+      verification-service:
+        base-url: http://localhost:9102
+        connect-timeout: 500ms
+        read-timeout: 3s
+      account-service:
+        base-url: http://localhost:9103
+        connect-timeout: 500ms
+        read-timeout: 3s
+      notification-service:
+        base-url: http://localhost:9104
+        connect-timeout: 500ms
+        read-timeout: 2s
+        default-header:
+          Efs-Product-Id: prototype-integrations
+
+# Optional per-client resilience switches; only needed when deviating from defaults.
+# prototype:
+#   clients:
+#     notification-service:
+#       breaker:
+#         enabled: false
+
+resilience4j:
+  circuitbreaker:
+    # The FailureClassifier is the only authority on outcomes: never set recordExceptions,
+    # ignoreExceptions or recordResult here.
+    configs:
+      default:
+        slidingWindowType: COUNT_BASED
+        slidingWindowSize: 20
+        minimumNumberOfCalls: 10
+        failureRateThreshold: 50
+        waitDurationInOpenState: 30s
+        permittedNumberOfCallsInHalfOpenState: 3
+        automaticTransitionFromOpenToHalfOpenEnabled: false
+        registerHealthIndicator: true
+        # An open downstream must not take our own health (and liveness) down.
+        allowHealthIndicatorToFail: false
+    instances:
+      account-service:
+        baseConfig: default
+        slowCallDurationThreshold: 1s
+        slowCallRateThreshold: 50
+      notification-service:
+        baseConfig: default
+        failureRateThreshold: 75
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,circuitbreakers,circuitbreakerevents,metrics
+  endpoint:
+    health:
+      show-details: always
+  health:
+    circuitbreakers:
+      enabled: true
+
+demo:
+  notification:
+    api-key: placeholder-not-a-secret

@@ -1,0 +1,38 @@
+# Base URLs are injected per WireMock server by @ConfigureWireMock(baseUrlProperties = ...).
+spring:
+  http:
+    serviceclient:
+      profile-service:
+        connect-timeout: 200ms
+        read-timeout: 500ms
+      verification-service:
+        read-timeout: 1s
+      account-service:
+        read-timeout: 2s
+      notification-service:
+        read-timeout: 1s
+
+# Small windows so breaker scenarios are fast and deterministic.
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        slidingWindowType: COUNT_BASED
+        slidingWindowSize: 4
+        minimumNumberOfCalls: 4
+        failureRateThreshold: 50
+        waitDurationInOpenState: 1s
+        permittedNumberOfCallsInHalfOpenState: 1
+        automaticTransitionFromOpenToHalfOpenEnabled: false
+    instances:
+      account-service:
+        baseConfig: default
+        slowCallDurationThreshold: 300ms
+        slowCallRateThreshold: 50
+      notification-service:
+        baseConfig: default
+        failureRateThreshold: 75
+
+demo:
+  notification:
+    api-key: test-api-key
