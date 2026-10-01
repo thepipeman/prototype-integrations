@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(./**)",
+      "Edit(./src/**)",
+      "Write(./src/**)",
+      "Edit(./docs/**)",
+      "Write(./docs/**)",
+      "Edit(./.claude/**)",
+      "Write(./.claude/**)",
+      "Bash(./gradlew compileJava)",
+      "Bash(./gradlew build *)",
+      "Bash(./gradlew test *)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Read(./**/*.pem)",
+      "Read(./**/*.key)",
+      "Read(./**/id_rsa*)",
+      "Read(./**/credentials*.json)"
+    ]
+  }
+}
