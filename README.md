@@ -11,6 +11,8 @@ Every client registered with Spring's HTTP Service Registry gets the following, 
 - a Resilience4j breaker applied by a `ClientHttpRequestInterceptor`,
 - a single translation and logging point that produces a small sealed exception hierarchy.
 
+Circuit breaker deep-dive (reuse scope, injection, escape hatches): [docs/circuit-breaker.md](docs/circuit-breaker.md).
+
 Stack: Java 25, Spring Boot 4.1.1 (Framework 7), Apache HttpClient5, Resilience4j 2.4.0 (`resilience4j-spring-boot4`), WireMock (`wiremock-spring-boot`) in tests.
 
 ```bash
