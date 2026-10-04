@@ -39,6 +39,16 @@ The integration tests are the demo. With `bootRun` and nothing listening on the 
 
 Dependencies point one way: `demo` → `call`/`failure`/`web`, and `client` → `failure`. The reusable packages never import `demo`.
 
+### The generated profile client
+
+`profile-service` is called through an OpenAPI-generated client, so the demo covers the most common integration case.
+
+- **Spec:** `src/main/resources/openapi/profile-service.yaml`, written by hand from the `Profile` record and the two profile endpoints.
+- **Generator:** the `org.openapi.generator` Gradle plugin (7.25.0), `java` generator with the `restclient` library, configured in `openApiGenerate` in `build.gradle.kts`.
+- **Output:** `build/generated/openapi`, packages `demo.profile.generated.{api,model,invoker}`. Nothing generated is checked in; `compileJava` depends on `openApiGenerate`, so any build regenerates it. Run `./gradlew openApiGenerate` to regenerate on its own after editing the spec.
+- **Wiring:** `DemoClientsConfiguration.profileApi` starts from the generated `ApiClient.buildRestClientBuilder()` (keeping its Jackson converter and date handling), applies the two `forClient` lines and passes the result to `new ApiClient(restClient)`. `ProfileClient` wraps `ProfileApi` and maps the generated `ProfileDto` to the demo's `Profile`.
+- **Jackson 2:** the generated code uses `com.fasterxml.jackson`, so `jackson-databind` and `jackson-datatype-jsr310` are on the classpath for it alone. The no-arg `buildRestClientBuilder()` is used because the `ObjectMapper` overload needs a Jackson 2 mapper, which Boot 4 doesn't provide. Expect two deprecation warnings from the generated code.
+
 ## Failure taxonomy
 
 Every downstream outcome lands in exactly one category. Statuses are classified by **one** `FailureClassifier`, which both the breaker and the status handler consult, so they can't disagree. I/O failures are always `DEPENDENCY_FAILURE`.
@@ -109,7 +119,7 @@ Rules:
 
 - **The breaker is innermost, by ordering rule.** Apply `circuitBreakers.forClient(...)` last, after the project's own interceptors, and error handling (if used) before it. Nothing enforces this in code.
 - **The breaker never relies on handler exceptions.** It sees raw statuses and raw `IOException`s. The status handler runs later, inside `RestClient`, on the buffered response.
-- **Translation and logging happen exactly once**, in the failure interceptor (I/O) or the status handler (statuses). Facades never log downstream failures. RestClient rethrows runtime exceptions from interceptors unchanged, so callers never see a `ResourceAccessException`.
+- **Translation and logging happen exactly once**, in the failure interceptor (I/O) or the status handler (statuses). Facades never log downstream failures. RestClient rethrows runtime exceptions from interceptors unchanged, so with error handling applied callers never see a `ResourceAccessException`. With the breaker alone they do: I/O failures and an open circuit arrive as a `ResourceAccessException` (cause `CircuitOpenIOException` for the open circuit), as described in [docs/circuit-breaker.md](docs/circuit-breaker.md#what-callers-see-with-the-breaker-alone).
 - **The body is fully buffered inside the breaker.** Measured duration therefore includes body transfer, so slow-call thresholds mean something, and a mid-body timeout is counted by the breaker. Streaming or large-payload clients should set `resilient-client.circuit-breaker.<name>.enabled: false`.
 - **Disable HttpClient5's automatic retry** (the demo does it in `DemoClientsConfiguration`; the library does not change a project's HTTP client). Otherwise it silently resends 429/503 after one second regardless of HTTP method, POSTs included. That would hide two attempts inside one breaker measurement.
 - **The classifier is the only authority.** Never set `recordExceptions`, `ignoreExceptions` or `recordResult` in `resilience4j.circuitbreaker.*`.
