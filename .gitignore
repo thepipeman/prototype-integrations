@@ -40,3 +40,4 @@ out/
 .claude/design-drafts/
 .claude/implementation-notes/
 .claude/ai-instructions/
+.claude/workflow
