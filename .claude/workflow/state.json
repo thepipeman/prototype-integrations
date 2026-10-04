@@ -1,7 +1,7 @@
 {
-  "phase": "implemented",
-  "spec_ref": ".claude/ai-instructions/resilient-rest-client-spec.md",
-  "design_doc": ".claude/design-drafts/resilient-rest-client-design.md",
+  "phase": "design",
+  "spec_ref": ".claude/ai-instructions/resilient-rest-client-v2-spec.md",
+  "design_doc": ".claude/design-drafts/resilient-rest-client-v2-yaml-design.md",
   "design_model": "opus",
   "code_reviewed": false
 }
