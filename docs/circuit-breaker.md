@@ -4,10 +4,11 @@ How the circuit breaker in this project works, and how to put it on a new client
 
 ## The short version
 
-- Every `RestClient` built with `ResilientRestClients.create(name)` gets its **own** Resilience4j circuit breaker, named after the client.
+- Every `RestClient` bean listed under `resilient-client.clients` in YAML gets its **own** Resilience4j circuit breaker, named after the client. Unlisted beans are untouched.
 - The breaker counts **dependency failures** (5xx, timeouts, refused connections, 408, 429). It does **not** count business errors (404, 409, 422, ...), because those mean the downstream is up and answering.
 - When too many recent calls failed, the breaker **opens**: calls fail fast with a 502 and never reach the network. After a cool-down it lets a few probe calls through to check whether the downstream has recovered.
-- You don't write any breaker code in a client. You pick a name, add YAML, and call `create(name)`.
+- You don't write any breaker code in a client. The project keeps its own `@Bean RestClient`; you add one YAML entry.
+- Error handling (typed exceptions, structured logging) is a separate switch per client and is **off** by default, because it changes the exceptions callers see.
 
 ## Where the breaker sits
 
@@ -16,12 +17,13 @@ flowchart LR
     F[Facade] --> C["Your client class<br/>(e.g. AccountClient)"]
     C --> RC[RestClient]
 
-    subgraph RC_INNER ["RestClient built by ResilientRestClients.create(name)"]
+    subgraph RC_INNER ["RestClient bean listed in resilient-client.clients"]
         direction LR
-        DFI["DownstreamFailureInterceptor<br/>IOException → DependencyFailedException"]
-        CUST["Your customizer's interceptors<br/>(optional)"]
+        PROJ["Project's own interceptors<br/>(outermost)"]
+        DFI["DownstreamFailureInterceptor<br/>IOException → DependencyFailedException<br/>(error-handling.enabled only)"]
+        CUST["ResilientClientCustomizer's<br/>interceptors (optional)"]
         CBI["CircuitBreakerInterceptor<br/>innermost"]
-        DFI --> CUST --> CBI
+        PROJ --> DFI --> CUST --> CBI
     end
 
     RC --> DFI
@@ -32,7 +34,7 @@ flowchart LR
 
 The breaker is the **innermost** interceptor on purpose: it sees the raw HTTP status and raw `IOException`s before anything translates them, so its bookkeeping can't be confused by other interceptors or by exception mapping.
 
-An open circuit is thrown as an `IOException` (`CircuitOpenIOException`), so it travels the same path as "connection refused" and comes out as `DependencyFailedException(reason = CIRCUIT_OPEN)` → HTTP 502 `DEPENDENCY_FAILED`.
+An open circuit is thrown as an `IOException` (`CircuitOpenIOException`), so it travels the same path as "connection refused". With error handling on it comes out as `DependencyFailedException(reason = CIRCUIT_OPEN)` → HTTP 502 `DEPENDENCY_FAILED`; with it off, callers see Spring's `ResourceAccessException` whose cause is the `CircuitOpenIOException`.
 
 ## What happens on one call
 
@@ -91,7 +93,7 @@ flowchart TD
 
 Why business 4xx count as **success**: a 404 means the downstream is healthy and answered correctly. Counting it as a failure would let ordinary "not found" traffic open the breaker.
 
-Why 401/403 are **ignored**: they mean *our* credentials or config are wrong, which says nothing about whether the downstream is up. A client can opt in to counting them as failures (see [Customizing](#customizing-per-client)).
+Why 401/403 are **ignored**: they mean *our* credentials or config are wrong, which says nothing about whether the downstream is up. A client can opt in to counting them as failures (see [Escape hatches](#escape-hatches)).
 
 ## The breaker's states
 
@@ -125,78 +127,151 @@ Numbers above are the `configs.default` values in `application.yaml`:
 
 Example with defaults: 10 calls to `profile-service`, 5 return 503 → 50% failure → breaker opens. For the next 30 seconds, every call to `profile-service` returns 502 immediately. Other clients (`account-service`, etc.) are unaffected; each has its own breaker.
 
-## Using it on a new client
+## Adopting it in a project
 
-Three steps. The client name (`loyalty-service` here) is the key that ties them together.
+1. **Add the dependency.** Nothing happens yet.
+2. **Make sure each downstream's `RestClient` is a bean.** Most already are. For an OpenAPI-generated `new ApiClient()`, expose the `RestClient` it builds internally:
 
-```mermaid
-flowchart LR
-    N(["name = loyalty-service"])
-    N --> Y1["spring.http.serviceclient.loyalty-service<br/>base URL, timeouts, headers"]
-    N --> Y2["resilience4j.circuitbreaker.instances.loyalty-service<br/>(optional) breaker tuning"]
-    N --> Y3["prototype.clients.loyalty-service<br/>(optional) breaker on/off"]
-    N --> J["clients.create(&quot;loyalty-service&quot;)"]
-    J --> B["Breaker named loyalty-service<br/>visible in /actuator/circuitbreakers"]
-```
+   ```java
+   @Bean
+   RestClient profileRestClient() {
+       return ApiClient.buildRestClientBuilder().build();      // generated defaults, now a bean
+   }
 
-**1. Transport config** (required):
+   @Bean
+   ProfileApi profileApi(RestClient profileRestClient, @Value("${clients.profile.base-url}") String baseUrl) {
+       ApiClient apiClient = new ApiClient(profileRestClient);  // gets the instrumented instance
+       apiClient.setBasePath(baseUrl);
+       return new ProfileApi(apiClient);
+   }
+   ```
+
+3. **List it in YAML.** The breaker is on from then on, and callers keep the exceptions they already handle.
+4. **When ready, set `error-handling.enabled: true`** per client and migrate that client's callers to `DownstreamBusinessException` / `Downstream.call`.
 
 ```yaml
-spring.http.serviceclient:
-  loyalty-service:
-    base-url: https://loyalty.internal
-    connect-timeout: 500ms
-    read-timeout: 2s
+resilient-client:
+  clients:
+    profile-service:              # client name = breaker name = log/metric "dependency"
+      bean: profileRestClient     # the existing RestClient bean (defaults to the client name)
+    notification-service:
+      bean: notificationRestClient
+      error-handling:
+        enabled: true
+      policy:
+        count-rejected-as-failure: true
+        status-overrides:
+          409: success
 ```
 
-**2. The client class:**
+At startup the library finds each listed bean and rebuilds it (`restClient.mutate()...build()`) with the breaker, and with error handling when switched on. Dependants receive the instrumented instance.
+
+```mermaid
+flowchart TD
+    A["Context refresh"] --> B["Project's @Bean RestClient is created"]
+    B --> C{"Listed as a 'bean' target<br/>of an enabled client?"}
+    C -- no --> D["Bean returned unchanged"]
+    C -- yes --> E["mutate().apply(forClient(name)).build()"]
+    E --> F["Dependants receive the instrumented RestClient"]
+    D --> G
+    F --> G["afterSingletonsInstantiated:<br/>ResilientClientsValidator fail-fast checks"]
+```
+
+### YAML reference
+
+```yaml
+resilient-client:
+  enabled: true                       # global kill switch; false = library does nothing at all
+  clients:
+    <name>:                           # required key; breaker name and `dependency` in logs/metrics
+      enabled: true                   # false = keep the entry but skip it
+      bean: <beanName>                # a RestClient bean. Default: <name>
+      http-service-group: <group>     # alternative target: a Spring HTTP service group. Exclusive with `bean`
+      circuit-breaker:
+        enabled: true                 # default true
+      error-handling:
+        enabled: false                # default false; true installs the status handler + I/O translation
+      policy:                         # optional failure taxonomy for this client (breaker AND error handling)
+        count-rejected-as-failure: false
+        status-overrides:             # status -> success | business | dependency-failure | dependency-rejected
+          409: success
+```
+
+Breaker tuning stays in the standard `resilience4j.circuitbreaker.instances.<name>` / `configs.default`; the library never copies those settings.
+
+### What callers see
+
+| | `error-handling: false` (default) | `error-handling: true` |
+|---|---|---|
+| 4xx / 5xx | Spring's `HttpClientErrorException` / `HttpServerErrorException` (unchanged) | `DownstreamBusinessException` / `DependencyFailedException` |
+| timeout / refused | `ResourceAccessException` (unchanged) | `DependencyFailedException(TIMEOUT / CONNECTION_FAILED)` |
+| circuit open | `ResourceAccessException`, cause `CircuitOpenIOException` | `DependencyFailedException(CIRCUIT_OPEN)` → 502 |
+
+### Interceptor order
+
+Everything is appended after what the bean already configured:
+
+1. the project's own interceptors (outermost),
+2. error handling, if enabled (`DownstreamStatusHandler` + `DownstreamFailureInterceptor`),
+3. every `ResilientClientCustomizer`, ordered by `@Order`,
+4. `CircuitBreakerInterceptor`, always last, so it sees raw statuses and raw `IOException`s.
+
+The same classifier instance goes to the breaker and the status handler, so they cannot disagree.
+
+## Escape hatches
+
+From lightest to heaviest:
+
+| # | I want to... | Do this | Code? |
+|---|---|---|---|
+| 1 | Tune thresholds, slow calls, wait duration | `resilience4j.circuitbreaker.instances.<name>` | no |
+| 2 | Switch one client's breaker or error handling on or off | `clients.<name>.circuit-breaker.enabled` / `error-handling.enabled` | no |
+| 3 | Treat a status differently (409 is fine, 401 opens the breaker) | `clients.<name>.policy.*` | no |
+| 4 | Add or alter something during instrumentation (header, interceptor, converter) | `ResilientClientCustomizer` bean | small |
+| 5 | A policy YAML can't express | `@Bean @Qualifier("<name>") FailureClassifier` (pure: no HTTP client dependencies) | small |
+| 6 | Protect a `RestClient` that isn't a bean | `builder.apply(resilientClients.forClient("<name>"))`; it still reads that client's YAML | one line |
+| 7 | Change how bodies are parsed or failures logged, for every client | Define your own `ErrorBodyParser` / `DownstreamFailureLog` bean | yes |
+| 8 | Replace the mechanism entirely | Define your own `ResilientClients` bean (every library bean is `@ConditionalOnMissingBean`), or exclude `ResilientClientAutoConfiguration` | yes |
+| 9 | Temporarily take one client out | `clients.<name>.enabled: false` | no |
+| 10 | Turn everything off (incident) | `resilient-client.enabled: false` (also skips validation) | no |
+
+Hatch 4, from the demo (`NotificationApiKeyCustomizer`):
 
 ```java
-@Component
-public class LoyaltyClient {
-
-    private final RestClient restClient;
-
-    public LoyaltyClient(ResilientRestClients clients) {
-        this.restClient = clients.create("loyalty-service");
-    }
-
-    public Points getPoints(String customerId) {
-        return restClient.get().uri("/points/{customerId}", customerId).retrieve().body(Points.class);
-    }
+@Bean
+ResilientClientCustomizer notificationApiKey(@Value("${demo.notification.api-key}") String apiKey) {
+    return (name, builder) -> {
+        if (name.equals("notification-service")) {
+            builder.defaultHeader("X-Api-Key", apiKey);
+        }
+    };
 }
 ```
 
-**3. Nothing else.** The breaker uses `configs.default` automatically. Callers get either the result or a typed exception; a facade never touches the breaker.
+Customizers run inside the error handling and outside the breaker: an interceptor added there is measured by the breaker but its exceptions are not translated. The breaker cannot be reordered; that would be hatch 8.
 
-## Customizing per client
-
-All options are local to one client. You never edit the shared code.
-
-| I want to... | Do this |
-|---|---|
-| Tune thresholds for one client | `resilience4j.circuitbreaker.instances.<name>` with `baseConfig: default` and the overrides (see `account-service` and `notification-service` in `application.yaml`) |
-| Open the breaker on slow responses | `slowCallDurationThreshold: 1s` and `slowCallRateThreshold: 50` on the instance |
-| Turn the breaker off for one client | `prototype.clients.<name>.breaker.enabled: false` (error handling and logging still apply) |
-| Count 401/403 as failures | `create(name, DefaultFailureClassifier.builder().countRejectedAsFailure(true).build(), b -> {})` |
-| Treat a specific status differently | `DefaultFailureClassifier.builder().override(409, Classification.success())` (or `Classification.dependencyFailure(...)` to make it count as an outage) |
-
-Example combining a classifier and a header (from `NotificationClient`):
-
-```java
-this.restClient = clients.create(DemoClients.NOTIFICATION,
-        DefaultFailureClassifier.builder()
-                .countRejectedAsFailure(true)
-                .override(409, Classification.success())
-                .build(),
-        builder -> builder.defaultHeader("X-Api-Key", apiKey));
-```
+Hatch 5 resolution order per client: qualified bean, then YAML `policy`, then the default taxonomy. Defining both a qualified bean and a YAML policy for the same client fails startup.
 
 Rules to keep in mind:
 
 - **Never** set `recordExceptions`, `ignoreExceptions` or `recordResult` in the Resilience4j config. The classifier decides outcomes; those settings would fight it.
 - Disable the breaker for streaming or large-payload clients: it buffers the whole body so it can time the full call.
 - There's no retry. A retry would go *outside* the breaker, and only for idempotent calls.
+- One `RestClient` bean per downstream: two client names pointing at one bean fail startup.
+
+## Fail-fast messages
+
+Startup fails with an `IllegalStateException` naming the client and the fix:
+
+| Check | Message |
+|---|---|
+| Listed `bean` doesn't exist | `resilient-client.clients.profile-service.bean 'profileRestClent' not found. RestClient beans: [profileRestClient, accountRestClient]` |
+| Listed bean isn't a `RestClient` | `resilient-client.clients.x: bean 'profileApi' is a ProfileApi, not a RestClient. Point 'bean' at the RestClient it's built from.` |
+| Both `bean` and `http-service-group` set | `resilient-client.clients.x: set either bean or http-service-group, not both` |
+| Two clients target the same bean | `resilient-client.clients.b: 'a' and 'b' both target bean 'shared'. One RestClient bean per downstream.` |
+| Breaker applied twice (YAML and `forClient` in code) | `resilient-client.clients.x: breaker configured twice (YAML and code). Remove one.` |
+| Qualified `FailureClassifier` bean and YAML `policy` | `resilient-client.clients.x: policy defined twice. Use the bean or YAML, not both.` |
+| `status-overrides` key outside 100-599 | binding error |
 
 ## Watching it
 
@@ -212,10 +287,16 @@ Rules to keep in mind:
 
 | File | What it does |
 |---|---|
-| `client/ResilientRestClients.java` | Builds each client; wires the breaker interceptor last |
+| `client/ResilientClientProperties.java` | The `resilient-client.*` YAML model |
+| `client/ResilientClientInstrumenter.java` | `BeanPostProcessor` that rebuilds listed `RestClient` beans |
+| `client/ResilientClients.java` | `forClient(name)`: applies error handling, customizers and the breaker (always last) |
+| `client/ClientPolicyResolver.java` | Qualified classifier bean, else YAML policy, else default |
+| `client/ResilientClientsValidator.java` | Fail-fast startup checks |
+| `client/ResilientClientGroupConfigurer.java` | Same instrumentation for `http-service-group` targets |
+| `client/ResilientClientAutoConfiguration.java` | Registers the above (every bean replaceable) |
 | `client/CircuitBreakerInterceptor.java` | Acquires permission, calls the downstream, records the outcome |
 | `failure/DefaultFailureClassifier.java` | Status → outcome table shared by the breaker and the status handler |
 | `failure/CircuitOpenIOException.java` | What an open breaker throws |
-| `client/ResilientClientsProperties.java` | The `prototype.clients.<name>.breaker.enabled` switch |
+| `demo/DemoClientsConfiguration.java` | Plays "the existing project": plain `@Bean RestClient`s, no library imports |
 
 Tests that show each behaviour: `CircuitBreakerBehaviour` (open, half-open, isolation, slow calls, actuator), `BreakerDisabledByPropertyIntegrationTest`, `EscapeHatches`, and the unit test `CircuitBreakerInterceptorTest`.

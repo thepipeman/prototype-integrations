@@ -1,18 +1,16 @@
 package io.pipecrafts.prototype.integration.demo.account;
 
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
-
-import io.pipecrafts.prototype.integration.client.ResilientRestClients;
-import io.pipecrafts.prototype.integration.demo.DemoClients;
 
 @Component
 public class AccountClient {
 
     private final RestClient restClient;
 
-    public AccountClient(ResilientRestClients clients) {
-        this.restClient = clients.create(DemoClients.ACCOUNT);
+    public AccountClient(@Qualifier("accountRestClient") RestClient restClient) {
+        this.restClient = restClient;
     }
 
     public Balance getBalance(String id) {
