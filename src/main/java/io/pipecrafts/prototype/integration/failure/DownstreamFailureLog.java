@@ -20,9 +20,10 @@ public final class DownstreamFailureLog {
 
     private static final Logger log = LoggerFactory.getLogger(DownstreamFailureLog.class);
 
-    private final MeterRegistry meterRegistry;
+    private final @Nullable MeterRegistry meterRegistry;
 
-    public DownstreamFailureLog(MeterRegistry meterRegistry) {
+    /** A {@code null} registry logs without counting. */
+    public DownstreamFailureLog(@Nullable MeterRegistry meterRegistry) {
         this.meterRegistry = meterRegistry;
     }
 
@@ -54,12 +55,14 @@ public final class DownstreamFailureLog {
                     failure.dependency(), failure.operation(), error.message(), failure.responseSnippet());
         }
 
-        meterRegistry.counter(METRIC,
-                        "dependency", failure.dependency(),
-                        "operation", failure.operation(),
-                        "category", category,
-                        "reason", reason)
-                .increment();
+        if (meterRegistry != null) {
+            meterRegistry.counter(METRIC,
+                            "dependency", failure.dependency(),
+                            "operation", failure.operation(),
+                            "category", category,
+                            "reason", reason)
+                    .increment();
+        }
     }
 
     /** The exception type only: transport exception messages carry the request URL. */

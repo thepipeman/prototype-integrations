@@ -1,0 +1,56 @@
+openapi: 3.0.3
+info:
+  title: Profile service
+  version: 1.0.0
+servers:
+  - url: http://localhost:9101
+paths:
+  /profiles/{id}:
+    get:
+      operationId: getProfile
+      tags: [Profile]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileDto'
+        '404':
+          description: No such profile
+  /profiles:
+    get:
+      operationId: findProfileByMobile
+      tags: [Profile]
+      parameters:
+        - name: mobile
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileDto'
+        '404':
+          description: No such profile
+components:
+  schemas:
+    ProfileDto:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        mobile:
+          type: string

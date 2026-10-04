@@ -1,9 +1,9 @@
 package io.pipecrafts.prototype.integration.demo.verification;
 
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
-import io.pipecrafts.prototype.integration.client.ResilientRestClients;
 import io.pipecrafts.prototype.integration.demo.DemoClients;
 
 @Component
@@ -11,8 +11,8 @@ public class VerificationClient {
 
     private final RestClient restClient;
 
-    public VerificationClient(ResilientRestClients clients) {
-        this.restClient = clients.create(DemoClients.VERIFICATION);
+    public VerificationClient(@Qualifier(DemoClients.VERIFICATION) RestClient restClient) {
+        this.restClient = restClient;
     }
 
     public Challenge startChallenge(StartChallengeRequest request) {

@@ -4,35 +4,12 @@ spring:
   threads:
     virtual:
       enabled: true
-  http:
-    # One block per downstream; the key is the name passed to ResilientRestClients.create(...).
-    # Placeholder localhost URLs: the app starts without the downstreams running.
-    serviceclient:
-      profile-service:
-        base-url: http://localhost:9101
-        connect-timeout: 500ms
-        read-timeout: 2s
-      verification-service:
-        base-url: http://localhost:9102
-        connect-timeout: 500ms
-        read-timeout: 3s
-      account-service:
-        base-url: http://localhost:9103
-        connect-timeout: 500ms
-        read-timeout: 3s
-      notification-service:
-        base-url: http://localhost:9104
-        connect-timeout: 500ms
-        read-timeout: 2s
-        default-header:
-          Efs-Product-Id: prototype-integrations
 
-# Optional per-client resilience switches; only needed when deviating from defaults.
-# prototype:
-#   clients:
+# Resilience switches per client, keyed by the Resilience4j instance name. Only needed to deviate from defaults.
+# resilient-client:
+#   circuit-breaker:
 #     notification-service:
-#       breaker:
-#         enabled: false
+#       enabled: false
 
 resilience4j:
   circuitbreaker:
@@ -72,5 +49,26 @@ management:
       enabled: true
 
 demo:
+  # One block per downstream; the key is also the circuit breaker name.
+  # Placeholder localhost URLs: the app starts without the downstreams running.
+  clients:
+    profile-service:
+      base-url: http://localhost:9101
+      connect-timeout: 500ms
+      read-timeout: 2s
+    verification-service:
+      base-url: http://localhost:9102
+      connect-timeout: 500ms
+      read-timeout: 3s
+    account-service:
+      base-url: http://localhost:9103
+      connect-timeout: 500ms
+      read-timeout: 3s
+    notification-service:
+      base-url: http://localhost:9104
+      connect-timeout: 500ms
+      read-timeout: 2s
+      default-header:
+        Efs-Product-Id: prototype-integrations
   notification:
     api-key: placeholder-not-a-secret
